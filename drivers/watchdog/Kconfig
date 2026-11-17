@@ -2141,6 +2141,14 @@ config STARFIVE_WATCHDOG
 	  Say Y here to support the watchdog of StarFive JH7100 and JH7110
 	  SoC. This driver can also be built as a module if choose M.
 
+config ZHIHE_WATCHDOG
+	tristate "Zhihe A210 AON PMIC Watchdog"
+	depends on ARCH_ZHIHE || COMPILE_TEST
+	select WATCHDOG_CORE
+	help
+	  Say Y or M here to support the AON E902 PMIC watchdog and cold
+	  system restart/poweroff driver on Zhihe A210 SoCs.
+
 # S390 Architecture
 
 config DIAG288_WATCHDOG
