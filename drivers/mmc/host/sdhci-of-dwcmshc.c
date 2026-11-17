@@ -582,10 +582,12 @@ static void th1520_set_uhs_signaling(struct sdhci_host *host,
 	struct dwcmshc_priv *priv = sdhci_pltfm_priv(pltfm_host);
 
 	dwcmshc_set_uhs_signaling(host, timing);
-	if (timing == MMC_TIMING_MMC_HS400)
+	if (timing == MMC_TIMING_MMC_HS400) {
 		priv->delay_line = PHY_SDCLKDL_DC_HS400;
-	else
+	} else {
+		priv->delay_line = PHY_SDCLKDL_DC_DEFAULT;
 		sdhci_writeb(host, 0, PHY_DLLDL_CNFG_R);
+	}
 	th1520_sdhci_set_phy(host);
 }
 
@@ -1089,6 +1091,32 @@ static int th1520_init(struct device *dev,
 	}
 
 	sdhci_enable_v4_mode(host);
+
+	return 0;
+}
+
+static int a210_init(struct device *dev,
+		     struct sdhci_host *host,
+		     struct dwcmshc_priv *dwc_priv)
+{
+	u32 emmc_caps = MMC_CAP2_NO_SD | MMC_CAP2_NO_SDIO;
+	int ret;
+
+	ret = th1520_init(dev, host, dwc_priv);
+	if (ret)
+		return ret;
+
+	/*
+	 * On Zhihe A210, eMMC VCC (avdd33_emmc) and VCCQ (avdd18_emmc_peri)
+	 * remain powered across SoC warm resets and hardware RST_n is disabled.
+	 * Flag non-removable eMMC slots without switched vmmc-supply so
+	 * mmc_shutdown() steps the card down to 1-bit Legacy Idle on
+	 * SYSTEM_RESTART instead of issuing EXT_CSD_POWER_OFF_LONG or CMD5.
+	 */
+	if ((host->mmc->caps2 & emmc_caps) == emmc_caps &&
+	    !(host->mmc->caps2 & MMC_CAP2_FULL_PWR_CYCLE) &&
+	    !device_property_present(dev, "vmmc-supply"))
+		host->mmc->caps2 |= MMC_CAP2_WARM_RESET_IDLE;
 
 	return 0;
 }
@@ -2212,7 +2240,7 @@ static const struct dwcmshc_pltfm_data sdhci_dwcmshc_a210_pdata = {
 		.quirks = SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN,
 		.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
 	},
-	.init = th1520_init,
+	.init = a210_init,
 };
 
 static const struct dwcmshc_pltfm_data sdhci_dwcmshc_cv18xx_pdata = {
