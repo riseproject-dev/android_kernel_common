@@ -8,6 +8,7 @@
  */
 
 #include <linux/err.h>
+#include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
@@ -2134,6 +2135,100 @@ static int _mmc_flush_cache(struct mmc_host *host)
 	return err;
 }
 
+static bool mmc_card_can_reset(struct mmc_card *card)
+{
+	u8 rst_n_function;
+
+	rst_n_function = card->ext_csd.rst_n_function;
+	return ((rst_n_function & EXT_CSD_RST_N_EN_MASK) == EXT_CSD_RST_N_ENABLED);
+}
+
+/*
+ * On platforms where eMMC VCC/VCCQ rails remain powered across SoC warm
+ * resets and hardware RST_n is disabled, sending EXT_CSD_POWER_OFF_LONG or
+ * CMD5 (SLEEP) leaves the eMMC controller ignoring CMD1 in the next boot's
+ * SPL. Step the card cleanly down from HS400/HS200/DDR52 to 1-bit Legacy SDR
+ * and issue CMD0(0) so both MaskROM boot mode (CMD0 0xFFFFFFFA) and SPL CMD1
+ * succeed immediately after a warm reset.
+ */
+static int mmc_warm_reset_to_idle(struct mmc_host *host)
+{
+	struct mmc_card *card = host->card;
+	int err = 0;
+
+	mmc_retune_disable(host);
+
+	if (mmc_card_hs400(card)) {
+		mmc_set_clock(host, card->ext_csd.hs_max_dtr);
+		err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+				   EXT_CSD_HS_TIMING, EXT_CSD_TIMING_HS,
+				   card->ext_csd.generic_cmd6_time, 0,
+				   false, true, MMC_CMD_RETRIES);
+		if (host->ios.enhanced_strobe) {
+			host->ios.enhanced_strobe = false;
+			if (host->ops->hs400_enhanced_strobe)
+				host->ops->hs400_enhanced_strobe(host,
+								 &host->ios);
+		}
+		if (host->ops->hs400_downgrade)
+			host->ops->hs400_downgrade(host);
+		mmc_set_timing(host, MMC_TIMING_MMC_DDR52);
+		if (!err)
+			err = mmc_switch_status(card, true);
+
+		if (!err) {
+			err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+					   EXT_CSD_BUS_WIDTH,
+					   EXT_CSD_BUS_WIDTH_8,
+					   card->ext_csd.generic_cmd6_time,
+					   0, false, true, MMC_CMD_RETRIES);
+			mmc_set_timing(host, MMC_TIMING_MMC_HS);
+			if (!err)
+				err = mmc_switch_status(card, true);
+		}
+	} else if (mmc_card_ddr52(card)) {
+		err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+				   EXT_CSD_BUS_WIDTH, EXT_CSD_BUS_WIDTH_8,
+				   card->ext_csd.generic_cmd6_time, 0,
+				   false, true, MMC_CMD_RETRIES);
+		mmc_set_timing(host, MMC_TIMING_MMC_HS);
+		if (!err)
+			err = mmc_switch_status(card, true);
+	}
+
+	if (!err && host->ios.timing != MMC_TIMING_LEGACY) {
+		err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+				   EXT_CSD_HS_TIMING, EXT_CSD_TIMING_BC,
+				   card->ext_csd.generic_cmd6_time, 0,
+				   false, true, MMC_CMD_RETRIES);
+		mmc_set_timing(host, MMC_TIMING_LEGACY);
+		mmc_set_bus_speed(card);
+		if (!err)
+			mmc_switch_status(card, true);
+	}
+
+	if (err)
+		pr_warn("%s: timing downgrade before warm reset returned %d, forcing CMD0\n",
+			mmc_hostname(host), err);
+
+	if (host->ios.enhanced_strobe) {
+		host->ios.enhanced_strobe = false;
+		if (host->ops->hs400_enhanced_strobe)
+			host->ops->hs400_enhanced_strobe(host, &host->ios);
+	}
+	mmc_set_bus_width(host, MMC_BUS_WIDTH_1);
+	mmc_set_timing(host, MMC_TIMING_LEGACY);
+	mmc_set_clock(host, host->f_init);
+	if (!mmc_host_is_spi(host))
+		mmc_set_bus_mode(host, MMC_BUSMODE_OPENDRAIN);
+
+	err = mmc_go_idle(host);
+	if (!err)
+		pr_info("%s: returned eMMC to Legacy Idle for warm restart\n",
+			mmc_hostname(host));
+	return err;
+}
+
 static int _mmc_suspend(struct mmc_host *host, enum mmc_poweroff_type pm_type)
 {
 	unsigned int notify_type = EXT_CSD_POWER_OFF_SHORT;
@@ -2157,8 +2252,14 @@ static int _mmc_suspend(struct mmc_host *host, enum mmc_poweroff_type pm_type)
 			goto out;
 	}
 
-	if (mmc_card_can_poweroff_notify(host->card) &&
-	    mmc_host_can_poweroff_notify(host, pm_type))
+	if (pm_type == MMC_POWEROFF_SHUTDOWN &&
+	    system_state == SYSTEM_RESTART &&
+	    (host->caps2 & MMC_CAP2_WARM_RESET_IDLE) &&
+	    !((host->caps & MMC_CAP_HW_RESET) && host->ops->card_hw_reset &&
+	      mmc_card_can_reset(host->card)))
+		err = mmc_warm_reset_to_idle(host);
+	else if (mmc_card_can_poweroff_notify(host->card) &&
+		 mmc_host_can_poweroff_notify(host, pm_type))
 		err = mmc_poweroff_notify(host->card, notify_type);
 	else if (mmc_card_can_sleep(host->card))
 		err = mmc_sleep(host);
@@ -2243,10 +2344,13 @@ static int mmc_shutdown(struct mmc_host *host)
 	/*
 	 * If the card remains suspended at this point and it was done by using
 	 * the sleep-cmd (CMD5), we may need to re-initialize it first, to allow
-	 * us to send the preferred poweroff-notification cmd at shutdown.
+	 * us to send the preferred poweroff-notification cmd (or warm-reset
+	 * Idle transition) at shutdown.
 	 */
-	if (mmc_card_can_poweroff_notify(host->card) &&
-	    !mmc_host_can_poweroff_notify(host, MMC_POWEROFF_SUSPEND))
+	if ((mmc_card_can_poweroff_notify(host->card) &&
+	     !mmc_host_can_poweroff_notify(host, MMC_POWEROFF_SUSPEND)) ||
+	    (system_state == SYSTEM_RESTART &&
+	     (host->caps2 & MMC_CAP2_WARM_RESET_IDLE)))
 		err = _mmc_resume(host);
 
 	if (!err)
@@ -2295,14 +2399,6 @@ static int mmc_runtime_resume(struct mmc_host *host)
 			mmc_hostname(host), err);
 
 	return 0;
-}
-
-static bool mmc_card_can_reset(struct mmc_card *card)
-{
-	u8 rst_n_function;
-
-	rst_n_function = card->ext_csd.rst_n_function;
-	return ((rst_n_function & EXT_CSD_RST_N_EN_MASK) == EXT_CSD_RST_N_ENABLED);
 }
 
 static int _mmc_hw_reset(struct mmc_host *host)
