@@ -33,7 +33,8 @@ static const unsigned int wdt_timeout[] = {8, 16, 32,128};
 #define ZHIHE_WDT_MIN_TIMEOUT		wdt_timeout[ZHIHE_TWDSCALE_MIN]
 #define ZHIHE_WDT_MAX_TIMEOUT		wdt_timeout[ZHIHE_TWDSCALE_MAX]
 #define ZHIHE_WDT_TIMEOUT		wdt_timeout[3]
-#define ZHIHE_RESET_PROTECTION_MS	256
+#define ZHIHE_RESET_PROTECTION_MS	1000
+#define ZHIHE_WDT_MIN_HEARTBEAT_MS	256
 
 struct aon_msg_wdg_ctrl {
 	struct aon_rpc_msg_hdr hdr;
@@ -209,6 +210,8 @@ static int zhihe_wdt_restart(struct watchdog_device *wdd, unsigned long action, 
 		return ret;
 	pr_debug("[%s,%d]: Finish to inform aon to restart the whole system....\n", __func__, __LINE__);
 
+	/* Give AON E902 time to cold-cycle SY70209 PMIC before fallback warm reset */
+	mdelay(ZHIHE_RESET_PROTECTION_MS);
 	return 0;
 }
 
@@ -315,7 +318,7 @@ static int zhihe_wdt_probe(struct platform_device *pdev)
 	wdd->ops = &zhihe_watchdog_ops;
 	wdd->min_timeout = ZHIHE_WDT_MIN_TIMEOUT;
 	wdd->max_timeout = ZHIHE_WDT_MAX_TIMEOUT;
-	wdd->min_hw_heartbeat_ms = ZHIHE_RESET_PROTECTION_MS;
+	wdd->min_hw_heartbeat_ms = ZHIHE_WDT_MIN_HEARTBEAT_MS;
 	wdd->status = WATCHDOG_NOWAYOUT_INIT_STATUS;
 
 	/* Higher than dw_wdt (128) so system restart prefers AON PMIC cold reset */
