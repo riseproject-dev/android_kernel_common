@@ -318,7 +318,8 @@ static int zhihe_wdt_probe(struct platform_device *pdev)
 	wdd->min_hw_heartbeat_ms = ZHIHE_RESET_PROTECTION_MS;
 	wdd->status = WATCHDOG_NOWAYOUT_INIT_STATUS;
 
-	watchdog_set_restart_priority(wdd, 128);
+	/* Higher than dw_wdt (128) so system restart prefers AON PMIC cold reset */
+	watchdog_set_restart_priority(wdd, 192);
 	watchdog_set_drvdata(wdd, wdt_dev);
 
 	/* Set default timeout, maybe default value if the watchdog is running */
