@@ -2141,6 +2141,18 @@ config STARFIVE_WATCHDOG
 	  Say Y here to support the watchdog of StarFive JH7100 and JH7110
 	  SoC. This driver can also be built as a module if choose M.
 
+config ZHIHE_WATCHDOG
+	tristate "Zhihe watchdog"
+	depends on ZHIHE_MBOX
+	select WATCHDOG_CORE
+	help
+	  This is the driver for the hardware watchdog on the Zhihe A210 board.
+	  The reset/poweroff path on this SoC is an RPC to the AON E902
+	  co-processor that this driver issues, so it is required for working
+	  reboot and poweroff (see drivers/watchdog/zhihe_wdt.c).
+
+	  To compile this driver as a module, choose M here.
+
 # S390 Architecture
 
 config DIAG288_WATCHDOG
