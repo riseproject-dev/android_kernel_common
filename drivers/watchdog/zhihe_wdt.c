@@ -56,7 +56,7 @@ struct zhihe_wdt_device {
 	unsigned int    is_aon_wdt_ena;
 };
 
-struct zhihe_wdt_device *zhihe_power_off_wdt;
+static struct zhihe_wdt_device *zhihe_power_off_wdt;
 
 static unsigned int zhihe_wdt_timeout_to_sel(unsigned secs)
 {
@@ -72,6 +72,7 @@ static unsigned int zhihe_wdt_timeout_to_sel(unsigned secs)
 
 static void zhihe_wdt_msg_hdr_fill(struct aon_rpc_msg_hdr *hdr, enum aon_wdg_func func)
 {
+	memset(hdr, 0, sizeof(*hdr));
 	hdr->svc = (uint8_t)AON_RPC_SVC_WDG;
 	hdr->func = (uint8_t)func;
 	hdr->size = AON_RPC_MSG_NUM;
@@ -261,18 +262,20 @@ static ssize_t aon_sys_wdt_store(struct device *dev,
 	return size;
 }
 
-void zhihe_pm_power_off(void)
+static void zhihe_pm_power_off(void)
 {
 	struct zhihe_wdt_device *wdt_dev = zhihe_power_off_wdt;
-	struct zhihe_aon_ipc *ipc = wdt_dev->ipc_handle;
 	struct aon_rpc_ack_common ack_msg = {0};
 	int ret;
+
+	if (!wdt_dev)
+		return;
 
 	pr_info("[%s,%d]poweroff system...\n", __func__, __LINE__);
 
 	zhihe_wdt_msg_hdr_fill(&wdt_dev->msg.hdr, AON_WDG_FUNC_POWER_OFF);
 
-	ret = zhihe_aon_call_rpc(ipc, &wdt_dev->msg, &ack_msg, true);
+	ret = zhihe_aon_call_rpc(wdt_dev->ipc_handle, &wdt_dev->msg, &ack_msg, true);
 
 	if (ret)
 		pr_err("failed to power off the system\n");
@@ -302,7 +305,7 @@ static int zhihe_wdt_probe(struct platform_device *pdev)
 	wdt_dev->is_aon_wdt_ena = 0;
 
 	ret = zhihe_aon_get_handle(&(wdt_dev->ipc_handle),"aon0");
-	if (ret == -EPROBE_DEFER)
+	if (ret)
 		return ret;
 	wdd = devm_kzalloc(dev, sizeof(*wdd), GFP_KERNEL);
 	if (!wdd)
@@ -352,6 +355,14 @@ static int zhihe_wdt_probe(struct platform_device *pdev)
 	return 0;
 }
 
+static void zhihe_wdt_remove(struct platform_device *pdev)
+{
+	sysfs_remove_group(&pdev->dev.kobj, &dev_attr_aon_sys_wdt_group);
+	if (pm_power_off == zhihe_pm_power_off)
+		pm_power_off = NULL;
+	zhihe_power_off_wdt = NULL;
+}
+
 static int zhihe_wdt_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -396,6 +407,7 @@ MODULE_DEVICE_TABLE(of, zhihe_wdt_of_match);
 
 static struct platform_driver zhihe_wdt_driver = {
 	.probe = zhihe_wdt_probe,
+	.remove = zhihe_wdt_remove,
 	.driver = {
 		.name = DRV_NAME,
 		.of_match_table = zhihe_wdt_of_match,
